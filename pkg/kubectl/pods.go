@@ -39,7 +39,7 @@ var (
 
 	currentPod          Pod
 	currentOpenPod      nucular.MasterWindow
-	podUpdateCh         chan bool
+	podUpdateCh         chan string
 	portForwardCancel   map[string]context.CancelFunc
 	portForwarding      map[string]MenuItem
 	portForwardMenuItem *systray.MenuItem
@@ -344,7 +344,7 @@ func watchPods() {
 	if podUpdateCh != nil {
 		return
 	}
-	podUpdateCh = make(chan bool)
+	podUpdateCh = make(chan string)
 	go func() {
 		var last string
 		tick := time.Tick(1 * time.Second)
@@ -363,7 +363,7 @@ func watchPods() {
 				} else {
 					if last != string(rawPodNames) {
 						last = string(rawPodNames)
-						podUpdateCh <- true
+						podUpdateCh <- string(rawPodNames)
 					}
 				}
 			}
@@ -372,25 +372,52 @@ func watchPods() {
 	go func() {
 		for {
 			select {
-			case <-podUpdateCh:
-				if currentOpenPod != nil {
-					notify.Warning("Warning!", "Pods have updated. Closing current window in 15 seconds...")
-					tick := time.Tick(15 * time.Second)
-					go func() {
-						closed := false
-						for {
-							select {
-							case <-tick:
-								currentOpenPod.Close()
-								closed = true
-							}
-							if closed {
-								break
-							}
-						}
-					}()
+			case podNamesString := <-podUpdateCh:
+				podNames := strings.Split(podNamesString, " ")
+				currentPodExists := false
+				newPods := false
+				missingPods := false
+				for _, pod := range podNames {
+					if pod == currentPod.Name {
+						currentPodExists = true
+					}
+					if _, ok := podMenuItems[pod]; !ok {
+						newPods = true
+					}
 				}
-				SetPods()
+				for pod := range podMenuItems {
+					missing := true
+					for _, podName := range podNames {
+						if pod == podName {
+							missing = false
+							break
+						}
+					}
+					if missing {
+						missingPods = true
+						break
+					}
+				}
+				if newPods || missingPods {
+					if currentPod.Name != "" && currentOpenPod != nil && !currentPodExists {
+						notify.Warning("Warning!", "Pods have updated. Closing current window in 15 seconds...")
+						tick := time.Tick(15 * time.Second)
+						go func() {
+							closed := false
+							for {
+								select {
+								case <-tick:
+									currentOpenPod.Close()
+									closed = true
+								}
+								if closed {
+									break
+								}
+							}
+						}()
+					}
+					SetPods()
+				}
 			}
 		}
 	}()
