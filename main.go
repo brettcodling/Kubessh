@@ -41,7 +41,7 @@ func main() {
 		systray.SetIcon(getIcon())
 		kubectl.AddContexts()
 		kubectl.AddNamespaces()
-		kubectl.AddPods()
+		pods := systray.AddMenuItem("Pods", "")
 		kubectl.AddPortForwarding()
 		systray.AddSeparator()
 		settings := systray.AddMenuItem("Settings", "")
@@ -50,6 +50,8 @@ func main() {
 		go func() {
 			for {
 				select {
+				case <-pods.ClickedCh:
+					kubectl.OpenPods()
 				case <-settings.ClickedCh:
 					kubectl.OpenSettings()
 				case <-refreshItem.ClickedCh:
@@ -80,6 +82,5 @@ func refresh(bypass bool) {
 	if bypass || kubectl.CheckConnection() {
 		kubectl.SetContexts()
 		kubectl.SetNamespaces()
-		kubectl.SetPods()
 	}
 }

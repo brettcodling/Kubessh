@@ -34,11 +34,10 @@ type Container struct {
 }
 
 var (
-	podMenuItems map[string]MenuItem
-	podsMenuItem *systray.MenuItem
-
 	currentPod          Pod
 	currentOpenPod      nucular.MasterWindow
+	currentOpenPods     nucular.MasterWindow
+	pods                []*Pod
 	podUpdateCh         chan string
 	portForwardCancel   map[string]context.CancelFunc
 	portForwarding      map[string]MenuItem
@@ -52,8 +51,6 @@ var (
 )
 
 func init() {
-	podMenuItems = make(map[string]MenuItem)
-
 	portForwarding = make(map[string]MenuItem)
 	portForwardCancel = make(map[string]context.CancelFunc)
 	portFrom.Flags = nucular.EditField
@@ -62,75 +59,65 @@ func init() {
 	portTo.SingleLine = true
 }
 
-func AddPods() {
-	podsMenuItem = systray.AddMenuItem("Pods:", "")
-	podsMenuItem.Hide()
-}
-
 func AddPortForwarding() {
 	portForwardMenuItem = systray.AddMenuItem("Port Forwarding:", "")
 	portForwardMenuItem.Hide()
 }
 
-func GetPods() []Pod {
-	var pods []Pod
+func getPods() {
+	pods = []*Pod{}
 	cmd := "kubectl get pods --no-headers"
 	rawPods, err := exec.Command("bash", "-c", cmd).Output()
 	if err != nil {
 		log.Println(err)
 		notify.Warning("ERROR!", err.Error())
 
-		return pods
+		return
 	}
 	scanner := bufio.NewScanner(strings.NewReader(string(rawPods)))
 	scanner.Split(bufio.ScanLines)
 	for scanner.Scan() {
 		columns := strings.Fields(scanner.Text())
-		pods = append(pods, Pod{
+		pod := Pod{
 			Name:     columns[0],
 			Ready:    columns[1],
 			Status:   columns[2],
 			Restarts: columns[3],
 			Age:      columns[4],
-		})
-	}
-
-	return pods
-}
-
-func SetPods() {
-	for _, podMenuItem := range podMenuItems {
-		podMenuItem.Item.Remove()
-	}
-	podMenuItems = make(map[string]MenuItem)
-	for _, p := range GetPods() {
-		addPod(p)
-	}
-	podsMenuItem.Show()
-	watchPods()
-}
-
-func addPod(p Pod) {
-	pod := podsMenuItem.AddSubMenuItem(p.getName(), "")
-	podMenuItems[p.Name] = MenuItem{
-		Item: pod,
-	}
-	go func(p Pod) {
-		for {
-			select {
-			case <-pod.ClickedCh:
-				go func(p Pod) {
-					err := p.getContainers()
-					if err != nil {
-						log.Println(err)
-						notify.Warning("ERROR!", err.Error())
-					}
-					currentPod = p
-					openPod()
-				}(p)
-			}
 		}
-	}(p)
+		pod.getContainers()
+		pods = append(pods, &pod)
+	}
+}
+
+func OpenPods() {
+	if currentOpenPods != nil {
+		currentOpenPods.Close()
+	}
+	getPods()
+	watchPods()
+	currentOpenPods = nucular.NewMasterWindow(0, "Pods: "+getCurrentContext().Name, updatePods)
+	currentOpenPods.SetStyle(style.FromTheme(style.DarkTheme, 2.0))
+	currentOpenPods.Main()
+}
+
+func updatePods(w *nucular.Window) {
+	for _, pod := range pods {
+		w.Row(30).Dynamic(1)
+		podOpen := w.TreePush(nucular.TreeNode, pod.Name, false)
+		if podOpen {
+			w.Row(25).Dynamic(8)
+			podDetails(w, *pod)
+			w.Spacing(1)
+			if w.ButtonText(">>") {
+				go func(pod Pod) {
+					currentPod = pod
+					openPod()
+				}(*pod)
+			}
+			w.TreePop()
+		}
+	}
 }
 
 func openPod() {
@@ -149,17 +136,20 @@ func openPod() {
 	currentOpenPod.Main()
 }
 
+func podDetails(w *nucular.Window, pod Pod) {
+	w.Label("Ready:", "LC")
+	w.Label(pod.Ready, "LC")
+	w.Label("Restarts:", "LC")
+	w.Label(pod.Restarts, "LC")
+	w.Label("Age:", "LC")
+	w.Label(pod.getAge(), "LC")
+}
+
 func updatePod(w *nucular.Window) {
 	w.Row(40).Dynamic(1)
 	w.Label("Details", "LC")
 	w.Row(30).Dynamic(2)
-	w.Label("Ready:", "LC")
-	w.Label(currentPod.Ready, "LC")
-	w.Label("Restarts:", "LC")
-	w.Label(currentPod.Restarts, "LC")
-	w.Row(30).Dynamic(2)
-	w.Label("Age:", "LC")
-	w.Label(currentPod.getAge(), "LC")
+	podDetails(w, currentPod)
 	if len(currentPod.Containers) > 0 {
 		w.Row(10).Dynamic(1)
 		w.Row(30).Dynamic(2)
@@ -254,7 +244,7 @@ func (pod Pod) getName() string {
 }
 
 func (pod Pod) getAge() string {
-	seconds := time.Now().Local().UTC().Unix() - currentPod.CreatedAt.Unix()
+	seconds := time.Now().Local().UTC().Unix() - pod.CreatedAt.Unix()
 	minutes := seconds / 60
 	hours := minutes / 60
 	days := hours / 24
@@ -377,46 +367,38 @@ func watchPods() {
 				currentPodExists := false
 				newPods := false
 				missingPods := false
-				for _, pod := range podNames {
-					if pod == currentPod.Name {
-						currentPodExists = true
-					}
-					if _, ok := podMenuItems[pod]; !ok {
-						newPods = true
-					}
-				}
-				for pod := range podMenuItems {
-					missing := true
-					for _, podName := range podNames {
-						if pod == podName {
-							missing = false
+				if !newPods {
+					for _, pod := range podNames {
+						isNew := true
+						for _, existingPod := range pods {
+							if existingPod.Name == pod {
+								isNew = false
+								break
+							}
+						}
+						newPods = isNew
+						if newPods || currentPodExists {
 							break
 						}
 					}
-					if missing {
-						missingPods = true
-						break
+				}
+				if !missingPods {
+					for _, pod := range pods {
+						missing := true
+						for _, podName := range podNames {
+							if pod.Name == podName {
+								missing = false
+								break
+							}
+						}
+						missingPods = missing
+						if missingPods {
+							break
+						}
 					}
 				}
-				if newPods || missingPods {
-					if currentPod.Name != "" && currentOpenPod != nil && !currentPodExists {
-						notify.Warning("Warning!", "Pods have updated. Closing current window in 15 seconds...")
-						tick := time.Tick(15 * time.Second)
-						go func() {
-							closed := false
-							for {
-								select {
-								case <-tick:
-									currentOpenPod.Close()
-									closed = true
-								}
-								if closed {
-									break
-								}
-							}
-						}()
-					}
-					SetPods()
+				if newPods || missingPods || !currentPodExists {
+					getPods()
 				}
 			}
 		}
